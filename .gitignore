@@ -1,6 +1,8 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
+**/*.pyc
 *$py.class
 *.so
 .Python
@@ -50,8 +52,13 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# Strategies
-strategies/
+# Experiment output artifacts
+experiments/results/*.json
+experiments/results/*.png
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
 
 # Misc
 *.log
