@@ -4,11 +4,78 @@
 
 Design dynamic fee strategies for a constant-product AMM. Your goal: maximize **edge**.
 
-## Submission
+## Results
 
-Upload a `.sol` file containing a contract named `Strategy` that inherits from `AMMStrategyBase`.
+### Current Best: SigmaAdaptive (526.54 Edge)
 
-Local results may diverge slightly from submission scores due to different RNG seeds. Run more simulations locally (`--simulations 1000`) to reduce variance and get closer to expected server results.
+| Strategy | Edge (500 sims) | Approach |
+|----------|-----------------|----------|
+| **SigmaAdaptive** | **526.54** | State estimation + adaptive fees |
+| MaxEdgeFinal | 410.58 | High base + extreme arb protection |
+| WinningV5 | 295.57 | Low base + spike/decay |
+
+SigmaAdaptive implements techniques from the winning AMM Challenge approaches: fair price estimation (pHat) with adaptive sigma-gated updates, cubic toxicity response, trade-aligned arb detection, and asymmetric directional fees. See [ANALYSIS.md](ANALYSIS.md) for the research methodology post-mortem.
+
+### Leaderboard Context
+
+The competition leaderboard top is ~522.39 with the 30 bps baseline scoring ~522.13. Local scores differ from server due to different RNG seeds, so cross-reference deltas rather than absolute values.
+
+## Quick Start
+
+```bash
+git clone https://github.com/benedictbrady/amm-challenge.git
+cd amm-challenge
+
+# Install dependencies (requires uv)
+uv sync
+uv sync --extra dev
+
+# Build Rust engine in release mode
+uv run maturin develop --release -m amm_sim_rs/Cargo.toml
+
+# Run 100 simulations
+uv run amm-match run contracts/src/SigmaAdaptiveStrategy.sol --simulations 100
+
+# Quick test
+uv run amm-match run contracts/src/StarterStrategy.sol --simulations 10
+
+# Validate without running
+uv run amm-match validate contracts/src/SigmaAdaptiveStrategy.sol
+```
+
+## Repository Structure
+
+```
+amm-challenge/
+├── amm_competition/          # Python simulation engine
+├── amm_sim_rs/               # Rust simulation engine (performance)
+├── contracts/
+│   ├── src/                  # Solidity strategies (33 total)
+│   │   ├── AMMStrategyBase.sol   # Abstract base contract
+│   │   ├── IAMMStrategy.sol      # Strategy interface
+│   │   ├── StarterStrategy.sol   # Template to copy
+│   │   ├── VanillaStrategy.sol   # 30 bps normalizer
+│   │   ├── SigmaAdaptiveStrategy.sol  # State-estimating adaptive (best)
+│   │   └── ...                    # Experimental strategies
+│   └── README.md             # Contract categorization
+├── experiments/              # Research experiments by theme
+│   ├── static-baselines/     # Fixed-fee calibration
+│   ├── arbitrage-defense/    # Arb detection experiments
+│   ├── grid-search/          # Parameter sweeps
+│   ├── greedy-architectures/ # Aggressive variants
+│   ├── competitive-benchmarks/ # Head-to-head comparisons
+│   ├── pareto-optimization/  # Multi-objective optimization
+│   ├── single-run-tests/     # Quick validations
+│   ├── results/              # Output data (gitignored)
+│   └── README.md             # Experiment index
+├── research/                 # Structured analysis documents
+├── tests/                    # pytest suite for the engine
+├── ANALYSIS.md               # Research methodology post-mortem
+├── parallel_harness.py       # Multiprocessing parameter sweep tool
+├── visualize.py              # Simulation visualization CLI
+├── grid_search.py            # Parameter search framework
+└── pyproject.toml            # Project config (uses uv)
+```
 
 ## The Simulation
 
@@ -22,7 +89,7 @@ Your strategy competes against a **normalizer AMM** running fixed 30 bps fees. B
 
 ### Price Process
 
-The fair price follows GBM: `S(t+1) = S(t) · exp(-σ²/2 + σZ)` where `Z ~ N(0,1)`
+The fair price follows GBM: `S(t+1) = S(t) · exp(−σ²/2 + σZ)` where `Z ~ N(0,1)`
 
 - Drift `μ = 0` (no directional bias)
 - Per-step volatility `σ ~ U[0.088%, 0.101%]` (varies across simulations)
@@ -35,7 +102,7 @@ Uninformed traders arrive via Poisson process:
 - Order size `~ LogNormal(μ, σ=1.2)` with mean `~ U[19, 21]` in Y terms
 - Direction: 50% buy, 50% sell
 
-Retail flow splits optimally between AMMs based on fees—lower fees attract more volume.
+Retail flow splits optimally between AMMs based on fees — lower fees attract more volume.
 
 ## The Math
 
@@ -44,37 +111,37 @@ Retail flow splits optimally between AMMs based on fees—lower fees attract mor
 Reserves `(x, y)` satisfy `x * y = k`. The spot price is `y/x`. When the AMM sells Δx tokens:
 
 ```
-Δy = y - k/(x - Δx)    (what trader pays)
+Δy = y − k/(x − Δx)    (what trader pays)
 ```
 
-Fees are taken on input: if fee is `f`, only `(1-f)` of the input affects reserves.
+Fees are taken on input: if fee is `f`, only `(1−f)` of the input affects reserves.
 
 ### Arbitrage
 
-When spot price diverges from fair price `p`, arbitrageurs trade to close the gap. For fee `f` (fee-on-input), let `γ = 1 - f`:
+When spot price diverges from fair price `p`, arbitrageurs trade to close the gap. For fee `f` (fee-on-input), let `γ = 1 − f`:
 
-- **Spot < fair** (AMM underprices X): Buy X from AMM. Optimal size: `Δx = x - √(k/(γ·p))`
-- **Spot > fair** (AMM overprices X): Sell X to AMM. Optimal size: `Δx_in = (√(k·γ/p) - x) / γ`
+- **Spot < fair** (AMM underprices X): Buy X from AMM. Optimal size: `Δx = x − √(k/(γ·p))`
+- **Spot > fair** (AMM overprices X): Sell X to AMM. Optimal size: `Δx_in = (√(k·γ/p) − x) / γ`
 
-Higher fees mean arbitrageurs need larger mispricings to profit, so your AMM stays "stale" longer—bad for edge.
+Higher fees mean arbitrageurs need larger mispricings to profit, so your AMM stays "stale" longer — bad for edge.
 
 ### Order Routing
 
-Retail orders split optimally across AMMs to equalize marginal prices post-trade. For two AMMs with fee rates `f₁, f₂`, let `γᵢ = 1 - fᵢ` and `Aᵢ = √(xᵢ γᵢ yᵢ)`. The optimal Y split is:
+Retail orders split optimally across AMMs to equalize marginal prices post-trade. For two AMMs with fee rates `f₁, f₂`, let `γᵢ = 1 − fᵢ` and `Aᵢ = √(xᵢ γᵢ yᵢ)`. The optimal Y split is:
 
 ```
-Δy₁ = (r(y₂ + γ₂Y) - y₁) / (γ₁ + rγ₂)    where r = A₁/A₂
+Δy₁ = (r(y₂ + γ₂Y) − y₁) / (γ₁ + rγ₂)    where r = A₁/A₂
 ```
 
-Lower fees → larger `γ` → more flow. But the relationship is nonlinear—small fee differences can shift large fractions of volume.
+Lower fees → larger `γ` → more flow. But the relationship is nonlinear — small fee differences can shift large fractions of volume.
 
 ### Edge
 
 Edge measures profitability using the fair price at trade time:
 
 ```
-Edge = Σ (amount_x × fair_price - amount_y)   for sells (AMM sells X)
-     + Σ (amount_y - amount_x × fair_price)   for buys  (AMM buys X)
+Edge = Σ (amount_x × fair_price − amount_y)   for sells (AMM sells X)
+     + Σ (amount_y − amount_x × fair_price)   for buys  (AMM buys X)
 ```
 
 - **Retail trades**: Positive edge (you profit from the spread)
@@ -84,9 +151,9 @@ Good strategies maximize retail edge while minimizing arb losses.
 
 ## Why the Normalizer?
 
-Without competition, setting 10% fees would appear profitable—you'd capture huge spreads on the few trades that still execute. The normalizer prevents this: if your fees are too high, retail routes to the 30 bps AMM and you get nothing.
+Without competition, setting 10% fees would appear profitable — you'd capture huge spreads on the few trades that still execute. The normalizer prevents this: if your fees are too high, retail routes to the 30 bps AMM and you get nothing.
 
-The normalizer also means there's no "free lunch"—you can't beat 30 bps just by setting 29 bps. The optimal fee depends on market conditions.
+The normalizer also means there's no "free lunch" — you can't beat 30 bps just by setting 29 bps. The optimal fee depends on market conditions.
 
 ## Writing a Strategy
 
@@ -110,7 +177,7 @@ contract Strategy is AMMStrategyBase {
 }
 ```
 
-The core mechanic: **you set a buy fee and a sell fee, and after every trade you can change what fees you're showing the market.**
+You set a buy fee and a sell fee, and after every trade you can change what fees you're showing the market.
 
 `afterInitialize` is called once at simulation start — return your opening `(bidFee, askFee)`. Then `afterSwap` is called after every trade that hits your AMM. You see what just happened and return updated fees for the next trade.
 
@@ -126,63 +193,33 @@ Return fees in WAD: `30 * BPS` = 30 basis points. Max fee is 10%.
 
 You get 32 storage slots (`slots[0..31]`) and helpers like `wmul`, `wdiv`, `sqrt`.
 
-### Example: Widen After Big Trades
+## Key Strategy Techniques
 
-A simple strategy that bumps fees up after large trades and decays back to a base fee otherwise:
+Based on analysis of winning approaches and our own experiments:
 
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+### State Estimation (The Winning Insight)
 
-import {AMMStrategyBase} from "./AMMStrategyBase.sol";
-import {TradeInfo} from "./IAMMStrategy.sol";
+The fair price is hidden, but estimable from observed trades. Key state variables to track:
+- **pHat**: Estimated fair price, reconstructed from trade implied prices
+- **sigmaHat**: Volatility estimate from absolute returns
+- **toxEma**: Toxicity = |spot − pHat| / pHat — how mispriced you are
+- **dirState**: Directional pressure (buy vs sell imbalance)
 
-contract Strategy is AMMStrategyBase {
-    function afterInitialize(uint256, uint256) external override returns (uint256, uint256) {
-        slots[0] = bpsToWad(30); // starting fee
-        return (bpsToWad(30), bpsToWad(30));
-    }
+### Adaptive Sigma-Gated Updates
 
-    function afterSwap(TradeInfo calldata trade) external override returns (uint256, uint256) {
-        uint256 fee = slots[0];
+Use a volatility-dependent gate for price updates: tight in low vol for fast tracking, wide in high vol for noise rejection. This enables aggressive price tracking (alpha = 0.26) without overfitting to outliers.
 
-        // Large trade relative to reserves? Widen the spread.
-        uint256 tradeRatio = wdiv(trade.amountY, trade.reserveY);
-        if (tradeRatio > WAD / 20) { // > 5% of reserves
-            fee = clampFee(fee + bpsToWad(10));
-        } else {
-            // Decay back toward 30 bps
-            uint256 base = bpsToWad(30);
-            if (fee > base) fee = fee - bpsToWad(1);
-        }
+### Nonlinear Fee Response
 
-        slots[0] = fee;
-        return (fee, fee);
-    }
+- **Cubic toxicity**: Fee ∝ tox³ at high toxicity for superlinear arb deterrence
+- **Trade-aligned boost**: Extra fee when trade direction matches spot−pHat divergence
+- **Asymmetric directional fees**: Attract side (toward fair price) gets larger discount
 
-    function getName() external pure override returns (string memory) {
-        return "Widen After Big Trades";
-    }
-}
-```
+See `contracts/src/SigmaAdaptiveStrategy.sol` for a complete implementation. All coefficients are named constants for easy grid-search tuning.
 
-## CLI
+## Research
 
-```bash
-# Build the Rust engine
-cd amm_sim_rs && pip install maturin && maturin develop --release && cd ..
-
-# Install
-pip install -e .
-
-# Run 1000 simulations (default)
-amm-match run my_strategy.sol
-
-# Quick test
-amm-match run my_strategy.sol --simulations 10
-
-# Validate without running
-amm-match validate my_strategy.sol
-```
-
-Output is your average edge across simulations. The 30 bps normalizer typically scores around 250-350 edge depending on market conditions.
+- [ANALYSIS.md](ANALYSIS.md) — Research methodology post-mortem: why we converged to 295 instead of 526
+- [research/](research/) — Structured analysis of challenge mechanics, detection mechanisms, and parameter space
+- [experiments/](experiments/) — Experiment scripts organized by research theme
+- [contracts/README.md](contracts/README.md) — Categorization of all 33 strategy contracts
